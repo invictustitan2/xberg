@@ -1030,7 +1030,7 @@ mod tests {
         );
 
         release_tx.send(()).unwrap();
-        tokio::time::timeout(PERMIT_RETURN_TIMEOUT, semaphore.acquire())
+        let _permit = tokio::time::timeout(PERMIT_RETURN_TIMEOUT, semaphore.acquire())
             .await
             .expect("permit must be released after blocking work finishes")
             .unwrap();
