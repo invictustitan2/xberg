@@ -648,29 +648,14 @@ pub fn list_ocr_backend_capabilities() -> crate::Result<Vec<OcrBackendCapability
 pub fn ocr_backend_supports_language(backend_name: &str, language: &str) -> crate::Result<bool> {
     use crate::plugins::registry::get_ocr_backend_registry;
 
-    let backends = get_ocr_backend_registry().read().registered_snapshot();
-    backend_supports_language(backends, backend_name, language)
-}
-
-fn backend_supports_language(
-    backends: Vec<(String, Arc<dyn OcrBackend>)>,
-    backend_name: &str,
-    language: &str,
-) -> crate::Result<bool> {
-    let normalized = backend_name.to_ascii_lowercase();
-    let canonical = if normalized == "paddleocr" {
-        "paddle-ocr"
-    } else {
-        normalized.as_str()
+    let backend = {
+        let registry = get_ocr_backend_registry();
+        registry.read().registered(backend_name)
     };
-    let backend = backends
-        .into_iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case(canonical))
-        .map(|(_, backend)| backend)
-        .ok_or_else(|| XbergError::Plugin {
-            message: format!("OCR backend '{backend_name}' not registered"),
-            plugin_name: backend_name.to_string(),
-        })?;
+    let backend = backend.ok_or_else(|| XbergError::Plugin {
+        message: format!("OCR backend '{backend_name}' not registered"),
+        plugin_name: backend_name.to_string(),
+    })?;
     Ok(backend.supports_language(language))
 }
 
@@ -881,17 +866,6 @@ mod tests {
         let capability = capability_from("mock-ocr".to_string(), backend);
         assert_eq!(capability.name(), "mock-ocr");
         assert_eq!(capability.supported_languages(), None);
-    }
-
-    #[test]
-    fn backend_language_query_uses_the_backend_verdict_without_enumerating_languages() {
-        let backend: Arc<dyn OcrBackend> = Arc::new(MockOcrBackend {
-            languages: vec!["eng".to_string(), "deu".to_string()],
-        });
-        let backends = vec![("mock-ocr".to_string(), backend)];
-
-        assert!(backend_supports_language(backends.clone(), "MOCK-OCR", "deu").expect("registered backend"));
-        assert!(!backend_supports_language(backends, "mock-ocr", "fra").expect("registered backend"));
     }
 
     #[test]
