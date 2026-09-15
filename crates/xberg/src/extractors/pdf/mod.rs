@@ -2938,6 +2938,51 @@ mod tests {
         assert_eq!(elements[2].backend_metadata, std::collections::HashMap::new());
     }
 
+    #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+    #[test]
+    fn should_withhold_mismatched_embedded_page_and_preserve_neighbor() {
+        let mut mismatched = crate::types::OcrElement {
+            page_number: 5,
+            ..Default::default()
+        };
+        mismatched.backend_metadata.insert(
+            crate::ocr_metadata_keys::OCR_PAGE_COORDINATE_FRAME_METADATA_KEY.to_string(),
+            serde_json::json!({
+                "page_number": 6,
+                "unit": "pixel",
+                "origin": "top_left",
+                "width": 1200,
+                "height": 1800,
+            }),
+        );
+        let mut neighbor = mismatched.clone();
+        neighbor.page_number = 4;
+        neighbor.backend_metadata.insert(
+            crate::ocr_metadata_keys::OCR_PAGE_COORDINATE_FRAME_METADATA_KEY.to_string(),
+            serde_json::json!({
+                "page_number": 4,
+                "unit": "pixel",
+                "origin": "top_left",
+                "width": 2400,
+                "height": 3200,
+            }),
+        );
+        let mut elements = vec![mismatched, neighbor];
+
+        assert_eq!(
+            take_ocr_coordinate_frames(&mut elements),
+            Some(serde_json::json!([{
+                "page_number": 4,
+                "unit": "pixel",
+                "origin": "top_left",
+                "width": 2400,
+                "height": 3200,
+            }]))
+        );
+        assert_eq!(elements[0].backend_metadata, std::collections::HashMap::new());
+        assert_eq!(elements[1].backend_metadata, std::collections::HashMap::new());
+    }
+
     #[cfg(feature = "pdf")]
     #[test]
     fn should_suppress_extracted_pdf_metadata_when_disabled() {
