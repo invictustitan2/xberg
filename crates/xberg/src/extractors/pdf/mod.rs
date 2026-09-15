@@ -505,6 +505,23 @@ fn select_pdf_document(
     (doc, origin, structured)
 }
 
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+fn take_ocr_coordinate_frames(elements: &mut [crate::types::OcrElement]) -> Option<serde_json::Value> {
+    // ~keep One element per page carries the frame through page-local assembly; moving it here
+    // keeps coordinate-frame storage proportional to pages instead of OCR elements.
+    let mut frames: Vec<(u32, serde_json::Value)> = elements
+        .iter_mut()
+        .filter_map(|element| {
+            element
+                .backend_metadata
+                .remove(crate::ocr_metadata_keys::OCR_PAGE_COORDINATE_FRAME_METADATA_KEY)
+                .map(|frame| (element.page_number, frame))
+        })
+        .collect();
+    frames.sort_unstable_by_key(|(page_number, _)| *page_number);
+    (!frames.is_empty()).then(|| serde_json::Value::Array(frames.into_iter().map(|(_, frame)| frame).collect()))
+}
+
 fn attach_unrepresented_tables(doc: &mut InternalDocument, tables: Vec<crate::types::Table>) {
     if doc.tables.is_empty() {
         for table in tables {
@@ -2408,6 +2425,8 @@ impl PdfExtractor {
             ocr_elements = accepted_mixed_ocr_elements(accepted_pages);
             replace_tables_with_ocr_output(&mut tables, accepted_mixed_ocr_tables(accepted_pages));
         }
+        #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+        let ocr_coordinate_frames = take_ocr_coordinate_frames(&mut ocr_elements);
         #[cfg(not(any(feature = "ocr", feature = "ocr-pipeline")))]
         let (mut doc, document_is_structured) =
             select_native_pdf_document(&text, mime_type, pre_rendered_doc, boundaries.as_deref());
@@ -2510,6 +2529,13 @@ impl PdfExtractor {
         // literal they would otherwise have been lost to already exists.
         #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
         doc.metadata.additional.extend(ocr_backend_additional_metadata);
+        #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+        if let Some(frames) = ocr_coordinate_frames {
+            doc.metadata.additional.insert(
+                std::borrow::Cow::Borrowed(crate::ocr_metadata_keys::OCR_PAGE_COORDINATE_FRAMES_METADATA_KEY),
+                frames,
+            );
+        }
 
         // Issue #66: `/PageLabels` — one display label per page, index-aligned
         // with `pdf_metadata.page_structure`/`PageBoundary::page_number`.
@@ -2793,6 +2819,64 @@ mod tests {
     use crate::core::config::OcrQualityThresholds;
     #[cfg(all(feature = "pdf", feature = "ocr"))]
     use serial_test::serial;
+
+    #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+    #[test]
+    fn should_collect_ocr_coordinate_frames_in_page_order_and_remove_transport_metadata() {
+        let frame = |page_number, width, height| {
+            let mut element = crate::types::OcrElement {
+                page_number,
+                ..Default::default()
+            };
+            element.backend_metadata.insert(
+                crate::ocr_metadata_keys::OCR_PAGE_COORDINATE_FRAME_METADATA_KEY.to_string(),
+                serde_json::json!({
+                    "page_number": page_number,
+                    "unit": "pixel",
+                    "origin": "top_left",
+                    "width": width,
+                    "height": height,
+                }),
+            );
+            element
+                .backend_metadata
+                .insert("backend".to_string(), serde_json::json!("value"));
+            element
+        };
+        let mut elements = vec![frame(2, 2400, 3200), frame(1, 1200, 1800)];
+
+        assert_eq!(
+            take_ocr_coordinate_frames(&mut elements),
+            Some(serde_json::json!([
+                {
+                    "page_number": 1,
+                    "unit": "pixel",
+                    "origin": "top_left",
+                    "width": 1200,
+                    "height": 1800,
+                },
+                {
+                    "page_number": 2,
+                    "unit": "pixel",
+                    "origin": "top_left",
+                    "width": 2400,
+                    "height": 3200,
+                }
+            ]))
+        );
+        let remaining = std::collections::HashMap::from_iter([("backend".to_string(), serde_json::json!("value"))]);
+        assert_eq!(elements[0].backend_metadata, remaining);
+        assert_eq!(elements[1].backend_metadata, elements[0].backend_metadata);
+    }
+
+    #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+    #[test]
+    fn should_withhold_ocr_coordinate_frames_when_no_element_has_one() {
+        let mut elements = vec![crate::types::OcrElement::default()];
+
+        assert_eq!(take_ocr_coordinate_frames(&mut elements), None);
+        assert_eq!(take_ocr_coordinate_frames(&mut []), None);
+    }
 
     #[cfg(feature = "pdf")]
     #[test]
