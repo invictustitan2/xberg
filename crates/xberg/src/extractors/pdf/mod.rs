@@ -509,15 +509,37 @@ fn select_pdf_document(
 fn take_ocr_coordinate_frames(elements: &mut [crate::types::OcrElement]) -> Option<serde_json::Value> {
     // ~keep One element per page carries the frame through page-local assembly; moving it here
     // keeps coordinate-frame storage proportional to pages instead of OCR elements.
-    let mut frames: Vec<(u32, serde_json::Value)> = elements
-        .iter_mut()
-        .filter_map(|element| {
-            element
-                .backend_metadata
-                .remove(crate::ocr_metadata_keys::OCR_PAGE_COORDINATE_FRAME_METADATA_KEY)
-                .map(|frame| (element.page_number, frame))
-        })
-        .collect();
+    let mut frames = ahash::AHashMap::<u32, serde_json::Value>::new();
+    let mut conflicting_pages = ahash::AHashSet::<u32>::new();
+    for element in elements {
+        let Some(frame) = element
+            .backend_metadata
+            .remove(crate::ocr_metadata_keys::OCR_PAGE_COORDINATE_FRAME_METADATA_KEY)
+        else {
+            continue;
+        };
+        let page_number = element.page_number;
+        let frame_page_number = frame.get("page_number").and_then(serde_json::Value::as_u64);
+        if page_number == 0 || frame_page_number != Some(page_number as u64) {
+            frames.remove(&page_number);
+            conflicting_pages.insert(page_number);
+            continue;
+        }
+        if conflicting_pages.contains(&page_number) {
+            continue;
+        }
+        match frames.get(&page_number) {
+            Some(existing) if existing == &frame => {}
+            Some(_) => {
+                frames.remove(&page_number);
+                conflicting_pages.insert(page_number);
+            }
+            None => {
+                frames.insert(page_number, frame);
+            }
+        }
+    }
+    let mut frames: Vec<(u32, serde_json::Value)> = frames.into_iter().collect();
     frames.sort_unstable_by_key(|(page_number, _)| *page_number);
     (!frames.is_empty()).then(|| serde_json::Value::Array(frames.into_iter().map(|(_, frame)| frame).collect()))
 }
@@ -2843,7 +2865,7 @@ mod tests {
                 .insert("backend".to_string(), serde_json::json!("value"));
             element
         };
-        let mut elements = vec![frame(2, 2400, 3200), frame(1, 1200, 1800)];
+        let mut elements = vec![frame(2, 2400, 3200), frame(1, 1200, 1800), frame(1, 1200, 1800)];
 
         assert_eq!(
             take_ocr_coordinate_frames(&mut elements),
@@ -2867,6 +2889,7 @@ mod tests {
         let remaining = std::collections::HashMap::from_iter([("backend".to_string(), serde_json::json!("value"))]);
         assert_eq!(elements[0].backend_metadata, remaining);
         assert_eq!(elements[1].backend_metadata, elements[0].backend_metadata);
+        assert_eq!(elements[2].backend_metadata, elements[0].backend_metadata);
     }
 
     #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
@@ -2876,6 +2899,43 @@ mod tests {
 
         assert_eq!(take_ocr_coordinate_frames(&mut elements), None);
         assert_eq!(take_ocr_coordinate_frames(&mut []), None);
+    }
+
+    #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+    #[test]
+    fn should_withhold_conflicting_ocr_coordinate_frames_for_one_page() {
+        let frame = |page_number, width, height| {
+            let mut element = crate::types::OcrElement {
+                page_number,
+                ..Default::default()
+            };
+            element.backend_metadata.insert(
+                crate::ocr_metadata_keys::OCR_PAGE_COORDINATE_FRAME_METADATA_KEY.to_string(),
+                serde_json::json!({
+                    "page_number": page_number,
+                    "unit": "pixel",
+                    "origin": "top_left",
+                    "width": width,
+                    "height": height,
+                }),
+            );
+            element
+        };
+        let mut elements = vec![frame(3, 1000, 1400), frame(3, 1200, 1800), frame(4, 2400, 3200)];
+
+        assert_eq!(
+            take_ocr_coordinate_frames(&mut elements),
+            Some(serde_json::json!([{
+                "page_number": 4,
+                "unit": "pixel",
+                "origin": "top_left",
+                "width": 2400,
+                "height": 3200,
+            }]))
+        );
+        assert_eq!(elements[0].backend_metadata, std::collections::HashMap::new());
+        assert_eq!(elements[1].backend_metadata, std::collections::HashMap::new());
+        assert_eq!(elements[2].backend_metadata, std::collections::HashMap::new());
     }
 
     #[cfg(feature = "pdf")]
