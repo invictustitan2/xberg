@@ -2,10 +2,10 @@
 //!
 //! This module defines the trait for implementing custom OCR backends.
 
-use crate::{Result, XbergError};
 use crate::core::config::OcrConfig;
 use crate::plugins::Plugin;
 use crate::types::ExtractedDocument;
+use crate::{Result, XbergError};
 use async_trait::async_trait;
 use std::path::Path;
 use std::sync::Arc;
