@@ -2,16 +2,13 @@
 //!
 //! This module defines the trait for implementing custom OCR backends.
 
-use crate::Result;
+use crate::{Result, XbergError};
 use crate::core::config::OcrConfig;
 use crate::plugins::Plugin;
 use crate::types::ExtractedDocument;
 use async_trait::async_trait;
 use std::path::Path;
 use std::sync::Arc;
-
-#[cfg(not(feature = "tokio-runtime"))]
-use crate::XbergError;
 
 /// OCR backend types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
