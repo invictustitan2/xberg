@@ -42,6 +42,8 @@ struct PdfPageCoordinateFrame {
     height: f64,
     unit: &'static str,
     origin: &'static str,
+    coordinate_space: &'static str,
+    rotation_degrees_clockwise: i32,
 }
 
 #[cfg(feature = "pdf")]
@@ -61,6 +63,7 @@ fn pdf_page_coordinate_frames(document: &xberg_native_pdf::PdfDocument) -> Vec<P
             if width <= 0.0 || height <= 0.0 {
                 return None;
             }
+            let rotation_degrees_clockwise = document.get_page_rotation(page_index).ok()?;
             Some(PdfPageCoordinateFrame {
                 page_number: u32::try_from(page_index).ok()?.checked_add(1)?,
                 left: f64::from(x0.min(x1)),
@@ -69,6 +72,8 @@ fn pdf_page_coordinate_frames(document: &xberg_native_pdf::PdfDocument) -> Vec<P
                 height: f64::from(height),
                 unit: "point",
                 origin: "bottom_left",
+                coordinate_space: "unrotated_user_space",
+                rotation_degrees_clockwise,
             })
         })
         .collect()
@@ -2907,7 +2912,7 @@ mod tests {
     }
 
     #[cfg(feature = "pdf")]
-    fn native_pdf_with_media_box(media_box: [i64; 4]) -> Vec<u8> {
+    fn native_pdf_with_media_box(media_box: [i64; 4], rotation: i64) -> Vec<u8> {
         use lopdf::{Document, Object, Stream, dictionary};
 
         let mut document = Document::with_version("1.5");
@@ -2924,6 +2929,7 @@ mod tests {
             "Contents" => content_id,
             "Resources" => dictionary! { "Font" => dictionary! { "F1" => font_id } },
             "MediaBox" => media_box.into_iter().map(Into::into).collect::<Vec<Object>>(),
+            "Rotate" => rotation,
         });
         document.objects.insert(
             pages_id,
@@ -2947,9 +2953,21 @@ mod tests {
     #[cfg(feature = "pdf")]
     #[tokio::test]
     async fn native_pdf_exposes_nonzero_media_box_origin() {
-        let content = native_pdf_with_media_box([0, -100, 612, 692]);
+        use crate::core::config::{HierarchyConfig, PdfConfig};
+
+        let content = native_pdf_with_media_box([10, -100, 622, 692], 90);
+        let config = ExtractionConfig {
+            pdf_options: Some(PdfConfig {
+                hierarchy: Some(HierarchyConfig {
+                    enabled: true,
+                    ..HierarchyConfig::default()
+                }),
+                ..PdfConfig::default()
+            }),
+            ..ExtractionConfig::default()
+        };
         let document = PdfExtractor::new()
-            .extract_content(&content, "application/pdf", &ExtractionConfig::default())
+            .extract_content(&content, "application/pdf", &config)
             .await
             .expect("native PDF extraction must succeed");
 
@@ -2957,14 +2975,33 @@ mod tests {
             document.metadata.additional.get("pdf_page_coordinate_frames"),
             Some(&serde_json::json!([{
                 "page_number": 1,
-                "left": 0.0,
+                "left": 10.0,
                 "bottom": -100.0,
                 "width": 612.0,
                 "height": 792.0,
                 "unit": "point",
-                "origin": "bottom_left"
+                "origin": "bottom_left",
+                "coordinate_space": "unrotated_user_space",
+                "rotation_degrees_clockwise": 90
             }]))
         );
+
+        let document = crate::extraction::derive::derive_extraction_result(
+            document,
+            true,
+            crate::core::config::OutputFormat::Plain,
+        );
+        let block = document.pages.as_ref().expect("page tracking must be enabled")[0]
+            .hierarchy
+            .as_ref()
+            .expect("hierarchy must be present")
+            .blocks
+            .iter()
+            .find(|block| block.text.contains("coordinate frame regression"))
+            .expect("fixture text must produce a hierarchy block");
+        let bbox = block.bbox.as_ref().expect("hierarchy block must retain its bbox");
+        assert_eq!(bbox.left, 72.0);
+        assert!(bbox.top >= -100.0 && bbox.bottom <= 692.0);
     }
 
     #[cfg(feature = "pdf")]
