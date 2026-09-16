@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::PageStructure;
 
+/// Per-page PDF point-space frames written into `Metadata::additional`. <!-- ~keep -->
+pub(crate) const PDF_PAGE_COORDINATE_FRAMES_METADATA_KEY: &str = "pdf_page_coordinate_frames";
+
 /// PDF-specific metadata.
 ///
 /// Contains metadata fields specific to PDF documents that are not in the common

@@ -32,6 +32,48 @@ use extraction::extract_all_from_native_document;
 #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
 use ocr::extract_with_ocr;
 
+#[cfg(feature = "pdf")]
+#[derive(serde::Serialize)]
+struct PdfPageCoordinateFrame {
+    page_number: u32,
+    left: f64,
+    bottom: f64,
+    width: f64,
+    height: f64,
+    unit: &'static str,
+    origin: &'static str,
+}
+
+#[cfg(feature = "pdf")]
+fn pdf_page_coordinate_frames(document: &xberg_native_pdf::PdfDocument) -> Vec<PdfPageCoordinateFrame> {
+    let Ok(page_count) = document.page_count() else {
+        return Vec::new();
+    };
+    (0..page_count)
+        .filter_map(|page_index| {
+            let (x0, y0, x1, y1) = document.get_page_media_box(page_index).ok()?;
+            let values = [x0, y0, x1, y1];
+            if !values.into_iter().all(f32::is_finite) {
+                return None;
+            }
+            let width = (x1 - x0).abs();
+            let height = (y1 - y0).abs();
+            if width <= 0.0 || height <= 0.0 {
+                return None;
+            }
+            Some(PdfPageCoordinateFrame {
+                page_number: u32::try_from(page_index).ok()?.checked_add(1)?,
+                left: f64::from(x0.min(x1)),
+                bottom: f64::from(y0.min(y1)),
+                width: f64::from(width),
+                height: f64::from(height),
+                unit: "point",
+                origin: "bottom_left",
+            })
+        })
+        .collect()
+}
+
 #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
 fn extraction_method_after_mixed_ocr(replacements: &ahash::AHashMap<u32, String>) -> ExtractionMethod {
     if replacements.is_empty() {
@@ -1741,6 +1783,7 @@ impl PdfExtractor {
             None => None,
         };
         let (outline_entries, bookmark_uris, pdf_revisions) = compatibility_data.unwrap_or_default();
+        let pdf_page_coordinate_frames = pdf_page_coordinate_frames(&native_document.doc);
 
         // Recovered before the document is handed on, which is the last point
         // it is still borrowable. Pages that draw nothing graph-shaped cost one
@@ -2532,6 +2575,12 @@ impl PdfExtractor {
             std::borrow::Cow::Borrowed("extraction_method"),
             serde_json::Value::String(extraction_method.as_str().to_string()),
         );
+        if !pdf_page_coordinate_frames.is_empty() {
+            doc.metadata.additional.insert(
+                std::borrow::Cow::Borrowed(crate::pdf::metadata::PDF_PAGE_COORDINATE_FRAMES_METADATA_KEY),
+                serde_json::json!(pdf_page_coordinate_frames),
+            );
+        }
         // #1575: restore the OCR-pipeline keys taken above, now that the fresh `Metadata`
         // literal they would otherwise have been lost to already exists.
         #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
@@ -2833,6 +2882,90 @@ mod tests {
     use crate::core::config::OcrQualityThresholds;
     #[cfg(all(feature = "pdf", feature = "ocr"))]
     use serial_test::serial;
+
+    #[cfg(feature = "pdf")]
+    fn native_text_stream() -> Vec<u8> {
+        use lopdf::Object;
+        use lopdf::content::{Content, Operation};
+
+        Content {
+            operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["F1".into(), 12.into()]),
+                Operation::new("Td", vec![72.into(), 620.into()]),
+                Operation::new(
+                    "Tj",
+                    vec![Object::string_literal(
+                        "Native PDF coordinate frame regression text with enough words for extraction.",
+                    )],
+                ),
+                Operation::new("ET", vec![]),
+            ],
+        }
+        .encode()
+        .expect("PDF content must encode")
+    }
+
+    #[cfg(feature = "pdf")]
+    fn native_pdf_with_media_box(media_box: [i64; 4]) -> Vec<u8> {
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut document = Document::with_version("1.5");
+        let pages_id = document.new_object_id();
+        let font_id = document.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+        });
+        let content_id = document.add_object(Stream::new(dictionary! {}, native_text_stream()));
+        let page_id = document.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "Resources" => dictionary! { "Font" => dictionary! { "F1" => font_id } },
+            "MediaBox" => media_box.into_iter().map(Into::into).collect::<Vec<Object>>(),
+        });
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page_id.into()],
+                "Count" => 1,
+            }),
+        );
+        let catalog_id = document.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        document.trailer.set("Root", catalog_id);
+
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("fixture PDF must serialize");
+        bytes
+    }
+
+    #[cfg(feature = "pdf")]
+    #[tokio::test]
+    async fn native_pdf_exposes_nonzero_media_box_origin() {
+        let content = native_pdf_with_media_box([0, -100, 612, 692]);
+        let document = PdfExtractor::new()
+            .extract_content(&content, "application/pdf", &ExtractionConfig::default())
+            .await
+            .expect("native PDF extraction must succeed");
+
+        assert_eq!(
+            document.metadata.additional.get("pdf_page_coordinate_frames"),
+            Some(&serde_json::json!([{
+                "page_number": 1,
+                "left": 0.0,
+                "bottom": -100.0,
+                "width": 612.0,
+                "height": 792.0,
+                "unit": "point",
+                "origin": "bottom_left"
+            }]))
+        );
+    }
 
     #[cfg(feature = "pdf")]
     #[test]

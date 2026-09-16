@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **(pdf): native extraction reports each page's PDF coordinate frame.**
+  `metadata.additional.pdf_page_coordinate_frames` carries the page number, MediaBox lower-left
+  origin, extent, point unit, and bottom-left axis convention. Consumers can now normalize native
+  hierarchy geometry correctly for cropped or imposed PDFs whose MediaBox does not start at zero.
 - **(ocr): the registry reports each backend's declared languages.** `list_ocr_backends()` returned
   only names, so a caller validating an OCR language against the installed backends had to maintain
   a second language table of its own. `list_ocr_backend_capabilities()` returns one
