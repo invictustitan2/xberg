@@ -611,8 +611,8 @@ fn reentrant_lifecycle_mutation_returns_in_use_error_without_deadlock() {
 #[serial]
 #[cfg(feature = "summarization")]
 async fn failed_explicit_builtin_registration_preserves_suppression() {
-    crate::plugins::clear_post_processors().unwrap();
-    crate::plugins::unregister_post_processor("summarization").unwrap();
+    retry_while_registry_in_use(crate::plugins::clear_post_processors);
+    retry_while_registry_in_use(|| crate::plugins::unregister_post_processor("summarization"));
     let registration =
         crate::plugins::register_post_processor(std::sync::Arc::new(SummarizationLifecycleTestProcessor {
             priority: 90,
