@@ -39,6 +39,16 @@ pub struct PaddleOCRVLConfig {
     pub weight_share_add_bias: bool,
     pub use_3d_rope: bool,
     pub rope_is_neox_style: bool,
+    /// Upper bound on the tokens generated for one image.
+    ///
+    /// Upstream `config.json` does not ship this key, so it carries a serde default and every
+    /// staged checkpoint keeps loading.
+    #[serde(default = "default_max_new_tokens")]
+    pub max_new_tokens: usize,
+}
+
+fn default_max_new_tokens() -> usize {
+    4096
 }
 
 /// RoPE scaling configuration for multi-rope support (M-RoPE).

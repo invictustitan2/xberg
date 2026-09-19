@@ -1135,6 +1135,18 @@ mod tests {
         }
     }
 
+    /// A `config.json` that names no token limit still loads and gets the crate default,
+    /// which is what every staged PaddleOCR-VL checkpoint ships.
+    #[test]
+    fn a_config_naming_no_token_limit_deserialises_to_the_default() {
+        let mut value = serde_json::to_value(tiny_model_config()).expect("serialize config");
+        let removed = value.as_object_mut().expect("config object").remove("max_new_tokens");
+        assert!(removed.is_some(), "the fixture must carry the key before it is removed");
+
+        let parsed: PaddleOCRVLConfig = serde_json::from_value(value).expect("config without the key must load");
+        assert_eq!(parsed.max_new_tokens, 4096);
+    }
+
     fn tiny_model_config() -> PaddleOCRVLConfig {
         PaddleOCRVLConfig {
             compression_ratio: 0.5,
@@ -1172,6 +1184,7 @@ mod tests {
             weight_share_add_bias: false,
             use_3d_rope: true,
             rope_is_neox_style: true,
+            max_new_tokens: 4096,
         }
     }
 

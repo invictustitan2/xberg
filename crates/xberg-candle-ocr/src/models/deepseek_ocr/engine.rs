@@ -10,6 +10,7 @@ use tokenizers::Tokenizer;
 
 use crate::CandleOcrError;
 use crate::error::Result;
+use crate::models::decode::{DecodeConfig, TokenSelector};
 use crate::vendor::aha::InferenceModel;
 
 use super::{config::DeepseekOCRConfig, model::DeepseekOCRModel, processor::DeepseekOCRProcessor};
@@ -312,8 +313,14 @@ impl DeepseekOCREngine {
             .forward_initial(&input_ids, 0, mm_data)
             .map_err(|e| CandleOcrError::InferenceFailed(format!("Initial forward: {}", e)))?;
 
-        let max_new_tokens = self.config.max_new_tokens;
+        let decode = DecodeConfig {
+            max_new_tokens: self.config.max_new_tokens,
+            ..DecodeConfig::default()
+        };
+        let max_new_tokens = decode.max_new_tokens;
+        let mut selector = TokenSelector::new(&decode);
         let stop_ids = self.model.stop_token_ids();
+        let prompt_len = prompt_ids.len();
         let mut output_tokens = prompt_ids.iter().map(|&id| id as u32).collect::<Vec<_>>();
 
         tracing::debug!(
@@ -331,15 +338,7 @@ impl DeepseekOCREngine {
                 .narrow(1, seq_len - 1, 1)
                 .map_err(|e| CandleOcrError::InferenceFailed(format!("Narrow last: {}", e)))?;
 
-            let next_token = last_logits
-                .argmax(2)
-                .map_err(|e| CandleOcrError::InferenceFailed(format!("Argmax: {}", e)))?
-                .squeeze(1)
-                .map_err(|e| CandleOcrError::InferenceFailed(format!("Squeeze seq: {}", e)))?
-                .squeeze(0)
-                .map_err(|e| CandleOcrError::InferenceFailed(format!("Squeeze batch: {}", e)))?
-                .to_scalar::<u32>()
-                .map_err(|e| CandleOcrError::InferenceFailed(format!("To scalar: {}", e)))?;
+            let next_token = selector.next_token(&last_logits, &output_tokens[prompt_len..])?;
 
             output_tokens.push(next_token);
 

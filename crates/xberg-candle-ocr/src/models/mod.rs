@@ -2,6 +2,12 @@
 
 pub mod image_processor;
 
+#[cfg(any(feature = "glm-ocr", feature = "paddleocr-vl", feature = "deepseek-ocr"))]
+pub mod decode;
+
+#[cfg(any(feature = "glm-ocr", feature = "paddleocr-vl", feature = "deepseek-ocr"))]
+pub use decode::{DecodeConfig, TokenSelector};
+
 #[cfg(feature = "trocr")]
 pub mod trocr;
 

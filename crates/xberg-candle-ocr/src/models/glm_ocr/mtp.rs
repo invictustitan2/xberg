@@ -1,8 +1,9 @@
 //! Token decoding loop for GLM-OCR.
 //!
 //! Consumes the assembled vision-prefix `input_embeds` and the GLM-4 decoder: prefills the KV
-//! cache, then samples one token per forward pass — greedy or nucleus, with an optional
-//! repetition penalty — until an EOS token or `max_new_tokens`. `generate_mrope` threads
+//! cache, then takes one token per forward pass from the crate's shared token selector, which
+//! applies the repetition penalty and samples, until an EOS token or `max_new_tokens`.
+//! `generate_mrope` threads
 //! explicit M-RoPE position ids through prefill and each decode step; `generate` uses plain
 //! sequence-length offsets.
 //!
@@ -20,6 +21,25 @@ pub struct MtpConfig {
     pub top_p: f32,
     pub temperature: f32,
     pub repetition_penalty: f32,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl MtpConfig {
+    /// Express GLM-OCR's decoding knobs as the crate's shared decode configuration.
+    ///
+    /// `repeat_last_n` is 0, so the penalty reads the whole output. GLM-OCR has applied it that
+    /// way since the backend landed and shows no repetition defect, so the shared selector keeps
+    /// its policy instead of the trailing window the other backends use.
+    fn decode_config(&self, max_new_tokens: usize) -> crate::models::decode::DecodeConfig {
+        crate::models::decode::DecodeConfig {
+            max_new_tokens,
+            repeat_penalty: self.repetition_penalty,
+            repeat_last_n: 0,
+            temperature: if self.sample { f64::from(self.temperature) } else { 0.0 },
+            top_p: f64::from(self.top_p),
+            ..crate::models::decode::DecodeConfig::default()
+        }
+    }
 }
 
 impl Default for MtpConfig {
@@ -42,6 +62,7 @@ mod imp {
     use super::MtpConfig;
     use crate::CandleOcrError;
     use crate::error::Result;
+    use crate::models::decode::TokenSelector;
 
     /// Build a `(3, 1, 1)` M-RoPE position tensor where all three axes share the
     /// same scalar value `pos`. Used for per-step autoregressive decoding once
@@ -81,27 +102,17 @@ mod imp {
         let mut next_text_pos = next_text_pos_start;
         let dev = input_embeds.device().clone();
 
+        let mut selector = TokenSelector::new(&config.decode_config(max_new_tokens));
+
         while output_ids.len() < max_new_tokens {
             let last_logits = logits
                 .squeeze(0)
                 .map_err(|e| CandleOcrError::InferenceFailed(format!("Squeeze batch: {}", e)))?;
 
-            let penalized_logits = if config.repetition_penalty != 1.0 && !output_ids.is_empty() {
-                apply_repetition_penalty(&last_logits, &output_ids, config.repetition_penalty)
-                    .map_err(|e| CandleOcrError::InferenceFailed(format!("Repetition penalty: {}", e)))?
-            } else {
-                last_logits.clone()
-            };
-
-            let token_id = if config.sample {
-                sample_nucleus(&penalized_logits, config.top_p, config.temperature)
-            } else {
-                sample_greedy(&penalized_logits)
-            }
-            .map_err(|e| CandleOcrError::InferenceFailed(format!("Sampling: {}", e)))?;
+            let token_id = selector.next_token(&last_logits, &output_ids)?;
 
             if output_ids.len() < 5 && tracing::enabled!(tracing::Level::TRACE) {
-                super::super::glm_debug_tensor(&format!("logits_step{}", output_ids.len()), &penalized_logits);
+                super::super::glm_debug_tensor(&format!("logits_step{}", output_ids.len()), &last_logits);
                 tracing::trace!(
                     "[glm-debug] step{}: token_id={} is_eos={}",
                     output_ids.len(),
@@ -165,24 +176,14 @@ mod imp {
 
         let mut seqlen_offset = prefix_len;
 
+        let mut selector = TokenSelector::new(&config.decode_config(max_new_tokens));
+
         while output_ids.len() < max_new_tokens {
             let last_logits = logits
                 .squeeze(0)
                 .map_err(|e| CandleOcrError::InferenceFailed(format!("Squeeze batch: {}", e)))?;
 
-            let penalized_logits = if config.repetition_penalty != 1.0 && !output_ids.is_empty() {
-                apply_repetition_penalty(&last_logits, &output_ids, config.repetition_penalty)
-                    .map_err(|e| CandleOcrError::InferenceFailed(format!("Repetition penalty: {}", e)))?
-            } else {
-                last_logits.clone()
-            };
-
-            let token_id = if config.sample {
-                sample_nucleus(&penalized_logits, config.top_p, config.temperature)
-            } else {
-                sample_greedy(&penalized_logits)
-            }
-            .map_err(|e| CandleOcrError::InferenceFailed(format!("Sampling: {}", e)))?;
+            let token_id = selector.next_token(&last_logits, &output_ids)?;
 
             output_ids.push(token_id);
 
@@ -208,149 +209,7 @@ mod imp {
 
         Ok(output_ids)
     }
-
-    /// Apply repetition penalty to logits: reduce scores for tokens already in output.
-    /// Penalty > 1 suppresses repetition; < 1 encourages it.
-    ///
-    pub(crate) fn apply_repetition_penalty(
-        logits: &Tensor,
-        output_ids: &[u32],
-        penalty: f32,
-    ) -> candle_core::Result<Tensor> {
-        let mut logits_vec = logits.to_vec1::<f32>()?;
-        for &token_id in output_ids {
-            let idx = token_id as usize;
-            if idx < logits_vec.len() {
-                if logits_vec[idx] >= 0.0 {
-                    logits_vec[idx] /= penalty;
-                } else {
-                    logits_vec[idx] *= penalty;
-                }
-            }
-        }
-        Tensor::from_vec(logits_vec, logits.dims(), logits.device())
-    }
-
-    /// Greedy decoding: return argmax of logits.
-    fn sample_greedy(logits: &Tensor) -> Result<u32> {
-        let argmax = logits
-            .argmax(0)
-            .map_err(|e| CandleOcrError::InferenceFailed(format!("Argmax: {}", e)))?;
-        let token_id = argmax
-            .to_scalar::<u32>()
-            .map_err(|e| CandleOcrError::InferenceFailed(format!("Scalar: {}", e)))?;
-        Ok(token_id)
-    }
-
-    /// Nucleus (top-p) sampling with temperature scaling.
-    pub(crate) fn sample_nucleus(logits: &Tensor, top_p: f32, temperature: f32) -> Result<u32> {
-        if temperature <= 0.0 {
-            return sample_greedy(logits);
-        }
-
-        let scaled = if (temperature - 1.0).abs() > 1e-5 {
-            logits
-                .affine(1.0 / temperature as f64, 0.0)
-                .map_err(|e| CandleOcrError::InferenceFailed(format!("Scale temp: {}", e)))?
-        } else {
-            logits.clone()
-        };
-
-        let probs = candle_nn::ops::softmax(&scaled, 0)
-            .map_err(|e| CandleOcrError::InferenceFailed(format!("Softmax: {}", e)))?;
-
-        let probs_vec = probs
-            .squeeze(0)
-            .map_err(|e| CandleOcrError::InferenceFailed(format!("Squeeze: {}", e)))?
-            .to_vec1::<f32>()
-            .map_err(|e| CandleOcrError::InferenceFailed(format!("To vec: {}", e)))?;
-
-        let mut indexed: Vec<(usize, f32)> = probs_vec
-            .iter()
-            .enumerate()
-            .filter(|&(_, &p)| p.is_finite())
-            .map(|(i, &p)| (i, p))
-            .collect();
-        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        let mut cumsum = 0.0;
-        let mut valid_indices = Vec::new();
-        for (idx, prob) in indexed {
-            cumsum += prob;
-            valid_indices.push((idx as u32, prob));
-            if cumsum >= top_p {
-                break;
-            }
-        }
-
-        if valid_indices.is_empty() {
-            return sample_greedy(logits);
-        }
-
-        let total_prob: f32 = valid_indices.iter().map(|(_, p)| p).sum();
-        if total_prob <= 0.0 {
-            return sample_greedy(logits);
-        }
-
-        use std::cell::RefCell;
-        thread_local! {
-            static RNG: RefCell<u64> = const { RefCell::new(0xDEADBEEF) };
-        }
-
-        RNG.with(|rng| {
-            let mut state = rng.borrow_mut();
-            *state = state.wrapping_mul(1103515245).wrapping_add(12345);
-            let sample_val = (*state % 1_000_000) as f32 / 1_000_000.0 * total_prob;
-
-            let mut cumsum = 0.0;
-            for (idx, prob) in &valid_indices {
-                cumsum += prob;
-                if sample_val <= cumsum {
-                    return Ok(*idx);
-                }
-            }
-            valid_indices
-                .last()
-                .map(|(idx, _)| *idx)
-                .ok_or_else(|| CandleOcrError::InferenceFailed("Empty valid indices".to_string()))
-        })
-    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use imp::{generate, generate_mrope};
-
-#[cfg(not(target_arch = "wasm32"))]
-#[cfg(test)]
-mod tests {
-    use super::imp::{apply_repetition_penalty, sample_nucleus};
-    use crate::error::Result;
-    use candle_core::{Device, Tensor};
-
-    #[test]
-    fn test_apply_repetition_penalty_reduces_both_signs() {
-        let logits = vec![0.5f32, -0.3, 1.0, -0.8];
-        let device = Device::Cpu;
-        let logits_tensor = Tensor::from_vec(logits.clone(), (4,), &device).unwrap();
-
-        let output_ids = vec![0, 1];
-        let result = apply_repetition_penalty(&logits_tensor, &output_ids, 1.1).unwrap();
-        let result_vec = result.to_vec1::<f32>().unwrap();
-
-        assert!((result_vec[0] - 0.5 / 1.1).abs() < 0.01);
-        assert!((result_vec[1] - (-0.3 * 1.1)).abs() < 0.01);
-        assert!((result_vec[2] - 1.0).abs() < 0.01);
-        assert!((result_vec[3] - (-0.8)).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_sample_nucleus_handles_nan() -> Result<()> {
-        let logits = vec![0.5f32, f32::NAN, 1.0, -0.8];
-        let device = Device::Cpu;
-        let logits_tensor = Tensor::from_vec(logits, (4,), &device).unwrap();
-
-        let result = sample_nucleus(&logits_tensor, 0.9, 1.0)?;
-        assert!(result < 4);
-        Ok(())
-    }
-}

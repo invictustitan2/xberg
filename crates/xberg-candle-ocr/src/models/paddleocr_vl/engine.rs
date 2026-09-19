@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer;
 
 use crate::error::Result;
+use crate::models::decode::{DecodeConfig, TokenSelector};
 use crate::{CandleOcrError, CandleOcrOutput};
 
 use super::config::{PaddleOCRVLConfig, PaddleOCRVLPreprocessorConfig};
@@ -207,12 +208,10 @@ impl PaddleOcrVlEngine {
 
         let input_ids = self.build_input_tokens(num_image_tokens)?;
 
-        let max_length = 4096;
-
         tracing::debug!("PaddleOCR-VL: clearing cache and starting generation");
         self.model.clear_kv_cache();
 
-        let generated_tokens = self.generate(&input_ids, &pixel_values, &grid_thw, max_length)?;
+        let generated_tokens = self.generate(&input_ids, &pixel_values, &grid_thw)?;
 
         let output_text = self
             .tokenizer
@@ -280,13 +279,7 @@ impl PaddleOcrVlEngine {
     /// each new token back through the cached decode path at its absolute
     /// position. Returns only the newly generated tokens, so decoding the
     /// result never echoes the prompt.
-    fn generate(
-        &mut self,
-        input_ids: &Tensor,
-        pixel_values: &Tensor,
-        grid_thw: &Tensor,
-        max_length: usize,
-    ) -> Result<Vec<u32>> {
+    fn generate(&mut self, input_ids: &Tensor, pixel_values: &Tensor, grid_thw: &Tensor) -> Result<Vec<u32>> {
         let prompt_tokens = input_ids
             .to_vec2::<u32>()
             .map_err(|e| CandleOcrError::InferenceFailed(format!("Input to_vec2: {}", e)))?
@@ -297,7 +290,7 @@ impl PaddleOcrVlEngine {
 
         tracing::debug!(
             initial_tokens = prompt_len,
-            max_length = max_length,
+            max_new_tokens = self.config.max_new_tokens,
             eos_token = self.eos_token_id,
             "PaddleOCR-VL: starting greedy decoding"
         );
@@ -327,18 +320,15 @@ impl PaddleOcrVlEngine {
             .map_err(|e| CandleOcrError::InferenceFailed(format!("Forward: {}", e)))?;
 
         let mut generated: Vec<u32> = Vec::new();
-        let max_new_tokens = max_length.saturating_sub(prompt_len);
+        let decode = DecodeConfig {
+            max_new_tokens: self.config.max_new_tokens,
+            ..DecodeConfig::default()
+        };
+        let max_new_tokens = decode.max_new_tokens;
+        let mut selector = TokenSelector::new(&decode);
 
         for step in 0..max_new_tokens {
-            let next_token = logits
-                .argmax(candle_core::D::Minus1)
-                .map_err(|e| CandleOcrError::InferenceFailed(format!("Argmax: {}", e)))?
-                .squeeze(1)
-                .map_err(|e| CandleOcrError::InferenceFailed(format!("Squeeze seq: {}", e)))?
-                .squeeze(0)
-                .map_err(|e| CandleOcrError::InferenceFailed(format!("Squeeze batch: {}", e)))?
-                .to_scalar::<u32>()
-                .map_err(|e| CandleOcrError::InferenceFailed(format!("Token scalar: {}", e)))?;
+            let next_token = selector.next_token(&logits, &generated)?;
 
             generated.push(next_token);
 
