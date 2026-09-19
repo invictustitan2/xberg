@@ -187,9 +187,11 @@ These two steps run after validation.
 
 **Quality scoring** is optional. When `enable_quality_processing=True`, Xberg analyzes the retained text and assigns a
 cleanliness/readability score between 0.0 and 1.0. The score penalizes OCR artifacts, embedded script/style noise, and
-navigation chrome; it rewards sentence and paragraph structure, multiple paragraphs, and punctuation, with an
-optional metadata bonus. It is not a completeness or recall score: clean text can score highly even when other content
-was omitted. The result is stored in `result.quality_score`; inspect `result.processing_warnings` separately for known
+navigation chrome; it rewards sentence and paragraph structure, multiple paragraphs, and punctuation, with an optional
+metadata bonus. When the text came from OCR and OCR recognized at least 20 words, the score is also capped by the
+word-count-weighted mean of per-page OCR confidence, so clean-looking text that OCR itself had little confidence in
+cannot score high. It is not a completeness or recall score: clean text can score highly even when other content was
+omitted. The result is stored in `result.quality_score`; inspect `result.processing_warnings` separately for known
 degraded or partial extraction.
 
 **Chunking** is also optional. When you provide a `ChunkingConfig`, the extracted text is split into overlapping fragments with configurable maximum size and overlap. Each chunk records its start and end offset relative to the original text.
