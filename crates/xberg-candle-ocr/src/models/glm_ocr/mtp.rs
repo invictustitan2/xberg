@@ -27,14 +27,16 @@ pub struct MtpConfig {
 impl MtpConfig {
     /// Express GLM-OCR's decoding knobs as the crate's shared decode configuration.
     ///
-    /// `repeat_last_n` is 0, so the penalty reads the whole output. GLM-OCR has applied it that
-    /// way since the backend landed and shows no repetition defect, so the shared selector keeps
-    /// its policy instead of the trailing window the other backends use.
+    /// `repeat_last_n` is 0, so the penalty reads the whole output, and the policy is the
+    /// frequency form, so a token is penalised once for every time it has appeared. GLM-OCR has
+    /// decoded that way since the backend landed. On a dense page the presence form leaves it
+    /// repeating one phrase, because the pressure on the repeated token stops growing.
     fn decode_config(&self, max_new_tokens: usize) -> crate::models::decode::DecodeConfig {
         crate::models::decode::DecodeConfig {
             max_new_tokens,
             repeat_penalty: self.repetition_penalty,
             repeat_last_n: 0,
+            repeat_penalty_policy: crate::models::decode::RepeatPenaltyPolicy::Frequency,
             temperature: if self.sample { f64::from(self.temperature) } else { 0.0 },
             top_p: f64::from(self.top_p),
             ..crate::models::decode::DecodeConfig::default()
@@ -213,3 +215,48 @@ mod imp {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use imp::{generate, generate_mrope};
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::MtpConfig;
+    use crate::models::decode::TokenSelector;
+    use candle_core::{Device, Tensor};
+
+    /// Scores for a three-token vocabulary, on the CPU.
+    fn row(values: &[f32]) -> Tensor {
+        Tensor::from_slice(values, values.len(), &Device::Cpu).expect("logits row")
+    }
+
+    #[test]
+    fn glm_escapes_a_token_it_has_already_repeated() {
+        // The defect behind the GLM-OCR page regression, at the seam where it happens.
+        //
+        // Token 1 leads token 2 by more than the penalty divides away, so one application of
+        // the penalty leaves token 1 ahead and the decoder emits it again. GLM-OCR needs the
+        // pressure to grow with each repeat, otherwise the step below returns token 1 however
+        // long the loop has already run and the page fills with one phrase.
+        let config = MtpConfig::default();
+        let mut selector = TokenSelector::new(&config.decode_config(2048));
+        let history = vec![1u32; 40];
+
+        assert_eq!(
+            selector.next_token(&row(&[0.1, 5.0, 3.8]), &history).expect("token"),
+            2,
+            "a token repeated 40 times must lose the step"
+        );
+    }
+
+    #[test]
+    fn glm_keeps_a_token_that_leads_and_has_not_repeated() {
+        // The other side of the same step: pressure that grows with repeats must not push the
+        // decoder off a leading token it has only just produced.
+        let config = MtpConfig::default();
+        let mut selector = TokenSelector::new(&config.decode_config(2048));
+
+        assert_eq!(
+            selector.next_token(&row(&[0.1, 5.0, 3.8]), &[1]).expect("token"),
+            1,
+            "one occurrence must not cost token 1 the step"
+        );
+    }
+}
