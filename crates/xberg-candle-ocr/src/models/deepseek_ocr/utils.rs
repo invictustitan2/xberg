@@ -208,13 +208,13 @@ pub fn topk(input: &Tensor, k: usize) -> Result<(Tensor, Tensor)> {
     let mut top_weights_vec = vec![vec![0.0f32; k]; batch_size];
     let mut top_indices_vec = vec![vec![0u32; k]; batch_size];
 
-    for b in 0..batch_size {
-        let row = flattened.i(b)?;
-        let mut items: Vec<(usize, f32)> = Vec::new();
-        for i in 0..num_items {
-            let val = row.i(i)?.to_scalar::<f32>()?;
-            items.push((i, val));
-        }
+    // ~keep: one device-to-host transfer for the whole score matrix. Reading it a scalar at a
+    // time stalled the decode loop on `num_items` round trips per row per MoE layer per token,
+    // which is what left the GPU idle for most of a page (GH#1711).
+    let scores = flattened.to_vec2::<f32>()?;
+
+    for (b, row) in scores.iter().enumerate().take(batch_size) {
+        let mut items: Vec<(usize, f32)> = row.iter().copied().enumerate().take(num_items).collect();
         items.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         for (idx, (item_idx, val)) in items.iter().take(k).enumerate() {
