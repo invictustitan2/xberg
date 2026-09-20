@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **(pdf): layout detection no longer fails partway through a long document.** The layout pass charged every page raster it had already produced against `security_limits.max_content_size`, so the running total crossed the 100 MiB default after about twelve standard pages, whatever the page size. Layout detection then failed for the whole document while extraction carried on, and the caller got a successful result with no layout hints and a warning naming the page's pixel dimensions, which reads as a page-size limit and is not one. Each batch is now charged on its own, so the limit bounds the work in flight rather than the length of the document; page count is bounded by `security_limits.max_pages`. (GH#1721)
+
 ## [1.2.6] - 2026-09-20
 
 ### Added
