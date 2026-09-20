@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **(ocr): the `auto` device preference reports when it cannot reach the accelerator, instead of running the whole job on the CPU in silence.** A failed CUDA or Metal init discarded its error and returned the CPU device with no log line naming the cause, so the run looked like a hang: the GPU stayed at 0%, several cores were busy in the forward pass, and the last log line was whatever ran before it. A warning now names the accelerator and the underlying error. GLM-OCR, PaddleOCR-VL and TrOCR already resolved the device once per engine, inside the engine pool's cold start; `candle-deepseek-ocr` now does the same, instead of resolving -- and warning -- once per page. (GH#1712)
+
 ## [1.2.6] - 2026-09-20
 
 ### Added
