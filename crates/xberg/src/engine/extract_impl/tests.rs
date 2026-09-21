@@ -485,6 +485,33 @@ fn engine_batch_base_config_applies_plan_budget_once() {
     assert!(Arc::ptr_eq(&adjusted, &reused));
 }
 
+/// Only the thread budget is divided across batch workers. `max_concurrent_ocr`
+/// is a bound on host memory, which every worker shares, so dividing it would be
+/// wrong and dropping it silently returns the caller to the automatic limit --
+/// the exact setting they reached for `max_concurrent_ocr` to escape.
+#[test]
+fn engine_batch_base_config_carries_the_configured_recognition_limit() {
+    let base = Arc::new(ExtractionConfig {
+        concurrency: Some(crate::core::config::ConcurrencyConfig {
+            max_threads: Some(8),
+            max_concurrent_ocr: Some(3),
+        }),
+        ..Default::default()
+    });
+
+    let adjusted = resolve_batch_base_config(&base, 2);
+    let concurrency = adjusted
+        .concurrency
+        .as_ref()
+        .expect("batch config keeps a concurrency block");
+    assert_eq!(concurrency.max_threads, Some(2), "the thread budget is the divided one");
+    assert_eq!(
+        concurrency.max_concurrent_ocr,
+        Some(3),
+        "the caller's recognition limit survives the budget rewrite"
+    );
+}
+
 /// Regression test for task #709: `resolve_input_config` is the single choke point
 /// both `extract_one` (the single-input `extract`/`extract_batch_sequential` path) and
 /// the shared-URL-group construction in `extract_batch_concurrent` go through.

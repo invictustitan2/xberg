@@ -64,7 +64,7 @@ pub struct ConcurrencyConfig {
     /// page image and recognition working set resident, so a host with many
     /// cores and little memory needs this lower than the thread budget. Set
     /// it to `4` to keep the fixed limit that releases up to 1.2.6 applied.
-    #[cfg_attr(feature = "alef-meta", alef(since = "1.2.6"))]
+    #[cfg_attr(feature = "alef-meta", alef(since = "1.3.0"))]
     pub max_concurrent_ocr: Option<usize>,
 }
 
@@ -191,29 +191,30 @@ const TESSERACT_SESSION_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Memory this process can grow into, resolved at most once.
 ///
-/// `None` means no limit was found: every platform except Linux, and Linux hosts
-/// whose `/proc` is not mounted. Callers then apply no memory bound, which is the
-/// same "no tighter limit was found" branch [`cgroup_cpu_quota_cores`] takes.
+/// This is the one memory reader in the crate. The OCR batch sizer in
+/// `extractors::pdf::ocr::pipeline` reads it through `get_available_memory`
+/// rather than keeping a second copy: two readers of the same three files drift,
+/// and the first draft of this one had already drifted twice — it compared the
+/// cgroup limit without subtracting current usage, and reported nothing at all
+/// on macOS, so the memory bound was a no-op there. ~keep
+///
+/// `None` means no limit was found: a Linux host whose `/proc` is not mounted, a
+/// macOS host whose `sysctl` fails, and every other platform. Callers then apply
+/// no memory bound, the same "no tighter limit was found" branch
+/// [`cgroup_cpu_quota_cores`] takes. It is not a reading of zero.
 static AVAILABLE_MEMORY_BYTES: OnceLock<Option<u64>> = OnceLock::new();
 
-fn available_memory_bytes() -> Option<u64> {
+pub(crate) fn available_memory_bytes() -> Option<u64> {
     *AVAILABLE_MEMORY_BYTES.get_or_init(read_available_memory_bytes)
 }
 
-/// Take the lower of the cgroup memory limit and the host's free memory.
+/// Take the lower of the cgroup headroom and the host's free memory.
 ///
 /// A container can carry both: a 64 GiB host that is nearly full still refuses
 /// an allocation the 8 GiB cgroup limit would have allowed, and vice versa.
 #[cfg(target_os = "linux")]
 fn read_available_memory_bytes() -> Option<u64> {
-    let cgroup = std::fs::read_to_string("/sys/fs/cgroup/memory.max")
-        .ok()
-        .and_then(|contents| parse_cgroup_memory_limit(&contents))
-        .or_else(|| {
-            std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes")
-                .ok()
-                .and_then(|contents| parse_cgroup_memory_limit(&contents))
-        });
+    let cgroup = cgroup_headroom_bytes();
     let host = std::fs::read_to_string("/proc/meminfo")
         .ok()
         .and_then(|contents| parse_mem_available_bytes(&contents));
@@ -223,9 +224,22 @@ fn read_available_memory_bytes() -> Option<u64> {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn read_available_memory_bytes() -> Option<u64> {
-    None
+/// What the cgroup will still hand out: its limit less what it already holds.
+///
+/// The limit alone is not headroom. A 8 GiB cgroup already using 6 GiB grants
+/// 2 GiB, and sizing a session count against the 8 gets the process killed.
+#[cfg(target_os = "linux")]
+fn cgroup_headroom_bytes() -> Option<u64> {
+    if let (Ok(max), Ok(current)) = (
+        std::fs::read_to_string("/sys/fs/cgroup/memory.max"),
+        std::fs::read_to_string("/sys/fs/cgroup/memory.current"),
+    ) && let Some(headroom) = parse_cgroup_headroom(&max, &current)
+    {
+        return Some(headroom);
+    }
+    let limit = std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes").ok()?;
+    let usage = std::fs::read_to_string("/sys/fs/cgroup/memory/memory.usage_in_bytes").ok()?;
+    parse_cgroup_headroom(&limit, &usage)
 }
 
 /// A cgroup memory limit at or above this is read as no limit at all.
@@ -236,11 +250,22 @@ fn read_available_memory_bytes() -> Option<u64> {
 #[cfg(target_os = "linux")]
 const CGROUP_MEMORY_UNLIMITED_FLOOR: u64 = 1 << 62;
 
-/// Read a cgroup memory limit, in bytes.
+/// Read a cgroup limit and its current usage, and return the difference.
+///
+/// Both spellings of "no limit" — the v2 word `max` and v1's near-`i64::MAX`
+/// count — return `None`, so an unlimited cgroup leaves the host reading alone.
 #[cfg(target_os = "linux")]
-fn parse_cgroup_memory_limit(contents: &str) -> Option<u64> {
-    let limit: u64 = contents.trim().parse().ok()?;
-    (limit > 0 && limit < CGROUP_MEMORY_UNLIMITED_FLOOR).then_some(limit)
+fn parse_cgroup_headroom(limit: &str, usage: &str) -> Option<u64> {
+    let limit = limit.trim();
+    if limit == "max" {
+        return None;
+    }
+    let limit: u64 = limit.parse().ok()?;
+    if limit == 0 || limit >= CGROUP_MEMORY_UNLIMITED_FLOOR {
+        return None;
+    }
+    let usage: u64 = usage.trim().parse().ok()?;
+    Some(limit.saturating_sub(usage))
 }
 
 /// Read `MemAvailable` out of `/proc/meminfo`, in bytes.
@@ -260,30 +285,92 @@ fn parse_mem_available_bytes(contents: &str) -> Option<u64> {
     value.checked_mul(1024)
 }
 
+/// macOS publishes no per-process headroom, so take half of physical memory.
+///
+/// Half rather than all: `hw.memsize` is what the machine has, not what is free,
+/// and the previous reader in the OCR batch sizer has used this same halving
+/// since it was written. Keeping the figure identical means moving that caller
+/// onto this reader does not change what it decides on a Mac. ~keep
+#[cfg(target_os = "macos")]
+fn read_available_memory_bytes() -> Option<u64> {
+    let output = std::process::Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()?;
+    let total: u64 = std::str::from_utf8(&output.stdout).ok()?.trim().parse().ok()?;
+    (total > 0).then(|| total / 2)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn read_available_memory_bytes() -> Option<u64> {
+    None
+}
+
+/// Guard for [`warn_recognition_memory_clamp_once`], as [`DEFAULT_CAP_WARNED`].
+static MEMORY_CLAMP_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// Say so when memory, not the thread budget, is what bounds recognition.
+///
+/// The sibling `resolve_thread_budget` warns once when its own ceiling binds.
+/// Without this, a host budgeted 32 threads that runs 6 recognition sessions
+/// looks like the fixed-four defect all over again, and nothing in the log
+/// distinguishes "capped by memory" from "the budget was never applied".
+fn warn_recognition_memory_clamp_once(already_warned: &AtomicBool, sessions: usize, thread_budget: usize) {
+    if already_warned
+        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+    {
+        tracing::warn!(
+            sessions,
+            thread_budget,
+            session_reserve_mb = TESSERACT_SESSION_MEMORY_BYTES / (1024 * 1024),
+            "free memory holds fewer concurrent OCR recognition sessions than the thread budget, \
+             so recognition runs narrower than the configured budget; raise the memory available \
+             to the process or set max_concurrent_ocr explicitly to silence this"
+        );
+    }
+}
+
 /// Resolve how many Tesseract recognition sessions may run at once.
 ///
 /// An explicit `max_concurrent_ocr` wins. Otherwise recognition follows the
 /// general thread budget, bounded by the number of sessions the available
 /// memory holds — see [`TESSERACT_SESSION_MEMORY_BYTES`] for the per-session
 /// cost this divides by.
-pub(crate) fn resolve_ocr_concurrency(config: Option<&ConcurrencyConfig>) -> usize {
-    resolve_ocr_concurrency_inner(config, resolve_thread_budget(config), available_memory_bytes())
+///
+/// Named for recognition rather than for OCR at large: `resolve_ocr_concurrency`
+/// was the VLM-concurrency function removed under GH#1465, and a doc comment in
+/// `extraction::image_ocr` still describes that one by name. ~keep
+pub(crate) fn resolve_recognition_concurrency(config: Option<&ConcurrencyConfig>) -> usize {
+    resolve_recognition_concurrency_with_guard(
+        config,
+        resolve_thread_budget(config),
+        available_memory_bytes(),
+        &MEMORY_CLAMP_WARNED,
+    )
 }
 
-/// Pure core of [`resolve_ocr_concurrency`], parameterized on the thread budget
-/// and the available memory so tests cover every branch on any machine.
-fn resolve_ocr_concurrency_inner(
+/// Pure core of [`resolve_recognition_concurrency`], parameterized on the thread
+/// budget, the available memory and the warning guard so tests cover every
+/// branch on any machine without touching the process-global guard.
+fn resolve_recognition_concurrency_with_guard(
     config: Option<&ConcurrencyConfig>,
     thread_budget: usize,
     available_memory: Option<u64>,
+    already_warned: &AtomicBool,
 ) -> usize {
     if let Some(requested) = config.and_then(|c| c.max_concurrent_ocr) {
         return requested.max(1);
     }
-    let memory_bound = available_memory
-        .map(|bytes| usize::try_from(bytes / TESSERACT_SESSION_MEMORY_BYTES).unwrap_or(usize::MAX))
-        .unwrap_or(usize::MAX);
-    thread_budget.min(memory_bound).max(1)
+    let Some(bytes) = available_memory else {
+        return thread_budget.max(1);
+    };
+    let memory_bound = usize::try_from(bytes / TESSERACT_SESSION_MEMORY_BYTES).unwrap_or(usize::MAX);
+    let sessions = thread_budget.min(memory_bound).max(1);
+    if sessions < thread_budget {
+        warn_recognition_memory_clamp_once(already_warned, sessions, thread_budget);
+    }
+    sessions
 }
 
 /// Recognition sessions this process allows, fixed when the pools were initialized.
@@ -293,8 +380,8 @@ fn resolve_ocr_concurrency_inner(
 /// their construction is ordered. Before initialization it resolves to the
 /// automatic limit, matching `active_thread_budget`.
 #[cfg(sceptre_ocr)]
-pub(crate) fn ocr_concurrency() -> usize {
-    *ACTIVE_OCR_CONCURRENCY.get_or_init(|| resolve_ocr_concurrency(None))
+pub(crate) fn recognition_concurrency() -> usize {
+    *ACTIVE_OCR_CONCURRENCY.get_or_init(|| resolve_recognition_concurrency(None))
 }
 
 /// Resolve the effective thread budget from config or auto-detection.
@@ -479,7 +566,7 @@ pub(crate) fn resolve_batch_concurrency(config: Option<&ConcurrencyConfig>, mode
 /// Initialize the process-wide CPU pools from `config` and return the budget.
 ///
 /// Sizes the global Rayon pool and fixes the recognition-session limit that
-/// [`ocr_concurrency`] reports. Safe to call multiple times — only the first
+/// [`recognition_concurrency`] reports. Safe to call multiple times — only the first
 /// call takes effect, so a later extraction with a different `max_threads`
 /// reads back the budget the first one installed.
 ///
@@ -496,7 +583,7 @@ pub(crate) fn init_thread_pools(config: Option<&ConcurrencyConfig>) -> usize {
     let budget = resolve_thread_budget(config);
     POOL_INIT.call_once(|| {
         ACTIVE_THREAD_BUDGET.store(budget.max(1), Ordering::Relaxed);
-        let _ = ACTIVE_OCR_CONCURRENCY.set(resolve_ocr_concurrency(config));
+        let _ = ACTIVE_OCR_CONCURRENCY.set(resolve_recognition_concurrency(config));
         #[cfg(not(target_arch = "wasm32"))]
         if let Err(_err) = rayon::ThreadPoolBuilder::new().num_threads(budget).build_global() {
             tracing::debug!(
@@ -908,12 +995,76 @@ mod tests {
     /// Memory for sixty-four sessions, so only the budget under test binds.
     const AMPLE_MEMORY: u64 = 64 * TESSERACT_SESSION_MEMORY_BYTES;
 
+    /// Resolve against a warning guard this call owns, for the reason given on
+    /// [`warn_default_thread_cap_once`]: a process-global guard is tripped by
+    /// whichever test in the binary ran first.
+    fn recognition_sessions(
+        config: Option<&ConcurrencyConfig>,
+        thread_budget: usize,
+        available_memory: Option<u64>,
+    ) -> usize {
+        resolve_recognition_concurrency_with_guard(config, thread_budget, available_memory, &AtomicBool::new(false))
+    }
+
+    /// The clamp is reported, not silent. A budget of 32 that runs 6 sessions
+    /// otherwise looks exactly like the fixed-four defect this change removes.
+    #[test]
+    #[serial_test::serial]
+    fn test_recognition_memory_clamp_warning_fires_exactly_once() {
+        let already_warned = AtomicBool::new(false);
+        let capture = EventCapture::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(EnvFilter::new("warn"))
+            .with(capture.clone());
+
+        tracing::subscriber::with_default(subscriber, || {
+            let six_sessions = Some(6 * TESSERACT_SESSION_MEMORY_BYTES);
+            for _ in 0..5 {
+                assert_eq!(
+                    resolve_recognition_concurrency_with_guard(None, 32, six_sessions, &already_warned),
+                    6
+                );
+            }
+        });
+
+        assert_eq!(
+            warn_event_count(&capture),
+            1,
+            "expected exactly one WARN event across repeated calls, got {:?}",
+            capture.levels.lock().unwrap()
+        );
+    }
+
+    /// A budget the memory can feed is not a clamp, and neither is an absent
+    /// reading, so both stay silent.
+    #[test]
+    #[serial_test::serial]
+    fn test_recognition_memory_clamp_warning_does_not_fire_when_memory_does_not_bind() {
+        let already_warned = AtomicBool::new(false);
+        let capture = EventCapture::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(EnvFilter::new("warn"))
+            .with(capture.clone());
+
+        tracing::subscriber::with_default(subscriber, || {
+            resolve_recognition_concurrency_with_guard(None, 8, Some(AMPLE_MEMORY), &already_warned);
+            resolve_recognition_concurrency_with_guard(None, 8, None, &already_warned);
+            let config = ConcurrencyConfig {
+                max_threads: Some(32),
+                max_concurrent_ocr: Some(2),
+            };
+            resolve_recognition_concurrency_with_guard(Some(&config), 32, Some(GIB), &already_warned);
+        });
+
+        assert_eq!(warn_event_count(&capture), 0);
+    }
+
     /// The historical four is gone: recognition follows the thread budget.
     #[test]
     fn test_ocr_concurrency_follows_the_thread_budget() {
-        assert_eq!(resolve_ocr_concurrency_inner(None, 8, Some(AMPLE_MEMORY)), 8);
-        assert_eq!(resolve_ocr_concurrency_inner(None, 32, Some(AMPLE_MEMORY)), 32);
-        assert_eq!(resolve_ocr_concurrency_inner(None, 2, Some(AMPLE_MEMORY)), 2);
+        assert_eq!(recognition_sessions(None, 8, Some(AMPLE_MEMORY)), 8);
+        assert_eq!(recognition_sessions(None, 32, Some(AMPLE_MEMORY)), 32);
+        assert_eq!(recognition_sessions(None, 2, Some(AMPLE_MEMORY)), 2);
     }
 
     #[test]
@@ -922,8 +1073,8 @@ mod tests {
             max_threads: Some(32),
             max_concurrent_ocr: Some(4),
         };
-        assert_eq!(resolve_ocr_concurrency_inner(Some(&config), 32, Some(AMPLE_MEMORY)), 4);
-        assert_eq!(resolve_ocr_concurrency_inner(Some(&config), 2, None), 4);
+        assert_eq!(recognition_sessions(Some(&config), 32, Some(AMPLE_MEMORY)), 4);
+        assert_eq!(recognition_sessions(Some(&config), 2, None), 4);
     }
 
     #[test]
@@ -932,7 +1083,7 @@ mod tests {
             max_threads: None,
             max_concurrent_ocr: Some(0),
         };
-        assert_eq!(resolve_ocr_concurrency_inner(Some(&config), 32, Some(AMPLE_MEMORY)), 1);
+        assert_eq!(recognition_sessions(Some(&config), 32, Some(AMPLE_MEMORY)), 1);
     }
 
     /// Cores the memory cannot feed are not sessions. Without this a container
@@ -941,21 +1092,24 @@ mod tests {
     #[test]
     fn test_ocr_concurrency_never_exceeds_what_memory_holds() {
         let session = TESSERACT_SESSION_MEMORY_BYTES;
-        assert_eq!(resolve_ocr_concurrency_inner(None, 32, Some(6 * session)), 6);
-        assert_eq!(resolve_ocr_concurrency_inner(None, 32, Some(session / 8)), 1);
-        assert_eq!(resolve_ocr_concurrency_inner(None, 4, Some(64 * session)), 4);
+        assert_eq!(recognition_sessions(None, 32, Some(6 * session)), 6);
+        assert_eq!(recognition_sessions(None, 32, Some(session / 8)), 1);
+        assert_eq!(recognition_sessions(None, 4, Some(64 * session)), 4);
     }
 
     /// No reading is not a reading of zero: platforms that report no memory
     /// limit keep the budget, the way a missing cgroup CPU quota does.
     #[test]
     fn test_ocr_concurrency_without_a_memory_reading_follows_the_budget() {
-        assert_eq!(resolve_ocr_concurrency_inner(None, 8, None), 8);
+        assert_eq!(recognition_sessions(None, 8, None), 8);
     }
 
     #[test]
     fn test_ocr_concurrency_reads_the_real_host() {
-        assert!(resolve_ocr_concurrency(None) >= 1, "the host always gets one session");
+        assert!(
+            resolve_recognition_concurrency(None) >= 1,
+            "the host always gets one session"
+        );
     }
 
     /// The defect: recognition stayed four wide however many threads the host
@@ -969,7 +1123,7 @@ mod tests {
         if budget <= 4 {
             return;
         }
-        let sessions = resolve_ocr_concurrency(None);
+        let sessions = resolve_recognition_concurrency(None);
         assert!(
             sessions > 4,
             "recognition admits {sessions} sessions on a host budgeted {budget} threads"
@@ -978,11 +1132,22 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn test_cgroup_memory_limit_reads_both_unlimited_spellings_as_no_limit() {
-        assert_eq!(parse_cgroup_memory_limit("2147483648\n"), Some(2 * GIB));
-        assert_eq!(parse_cgroup_memory_limit("max\n"), None);
-        assert_eq!(parse_cgroup_memory_limit("9223372036854771712\n"), None);
-        assert_eq!(parse_cgroup_memory_limit("0\n"), None);
+    fn test_cgroup_headroom_reads_both_unlimited_spellings_as_no_limit() {
+        assert_eq!(parse_cgroup_headroom("max\n", "1024\n"), None);
+        assert_eq!(parse_cgroup_headroom("9223372036854771712\n", "1024\n"), None);
+        assert_eq!(parse_cgroup_headroom("0\n", "1024\n"), None);
+    }
+
+    /// The limit is not the headroom. A cgroup already holding most of its
+    /// allowance grants what is left, not what it was given -- sizing sessions
+    /// against the limit is how the process gets killed rather than slowed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_cgroup_headroom_subtracts_current_usage_from_the_limit() {
+        assert_eq!(parse_cgroup_headroom("2147483648\n", "0\n"), Some(2 * GIB));
+        assert_eq!(parse_cgroup_headroom("8589934592\n", "6442450944\n"), Some(2 * GIB));
+        assert_eq!(parse_cgroup_headroom("2147483648\n", "4294967296\n"), Some(0));
+        assert_eq!(parse_cgroup_headroom("2147483648\n", "not-a-number\n"), None);
     }
 
     #[cfg(target_os = "linux")]

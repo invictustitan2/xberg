@@ -1089,9 +1089,13 @@ fn resolve_batch_input_config(
 
     let mut resolved = Arc::unwrap_or_clone(resolved);
     if needs_thread_budget {
+        // Only the thread budget is divided across batch workers. A caller's
+        // `max_concurrent_ocr` is a memory bound on the host, not a per-document
+        // share, so it survives the rewrite; rebuilding the struct from scratch
+        // silently dropped it. ~keep
         resolved.concurrency = Some(crate::core::config::ConcurrencyConfig {
             max_threads: Some(thread_budget),
-            max_concurrent_ocr: None,
+            ..resolved.concurrency.unwrap_or_default()
         });
     }
     resolved.ensure_cancel_token();
@@ -1105,9 +1109,10 @@ fn resolve_batch_base_config(base_config: &Arc<ExtractionConfig>, thread_budget:
     }
 
     let mut resolved = (**base_config).clone();
+    // As in `resolve_batch_input_config`: divide the thread budget, carry the rest. ~keep
     resolved.concurrency = Some(crate::core::config::ConcurrencyConfig {
         max_threads: Some(thread_budget),
-        max_concurrent_ocr: None,
+        ..resolved.concurrency.unwrap_or_default()
     });
     Arc::new(resolved)
 }

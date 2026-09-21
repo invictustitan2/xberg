@@ -1,7 +1,7 @@
 //! Bounded, keyed ownership pool for native Tesseract handles.
 
 use std::ops::Deref;
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex};
 
 use crate::ocr::error::OcrError;
 use xberg_tesseract::TesseractAPI;
@@ -16,10 +16,11 @@ use xberg_tesseract::TesseractAPI;
 /// different limits.
 ///
 /// `ConcurrencyConfig::max_concurrent_ocr` sets it; see
-/// [`crate::core::config::concurrency::resolve_ocr_concurrency`] for the default.
+/// [`crate::core::config::concurrency::resolve_recognition_concurrency`] for the default.
 pub(crate) fn tesseract_api_capacity() -> usize {
-    static CAPACITY: OnceLock<usize> = OnceLock::new();
-    *CAPACITY.get_or_init(crate::core::config::concurrency::ocr_concurrency)
+    // `recognition_concurrency` latches its own value, so a second cache here
+    // would only copy a number that can no longer change. ~keep
+    crate::core::config::concurrency::recognition_concurrency()
 }
 
 #[derive(Clone, PartialEq, Eq)]
