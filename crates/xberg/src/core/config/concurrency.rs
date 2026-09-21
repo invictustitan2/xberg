@@ -292,6 +292,7 @@ fn resolve_ocr_concurrency_inner(
 /// backend and the handle pool behind it always see the same number however
 /// their construction is ordered. Before initialization it resolves to the
 /// automatic limit, matching `active_thread_budget`.
+#[cfg(sceptre_ocr)]
 pub(crate) fn ocr_concurrency() -> usize {
     *ACTIVE_OCR_CONCURRENCY.get_or_init(|| resolve_ocr_concurrency(None))
 }
