@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.2.6] - 2026-09-20
+## [Unreleased]
+
+### Changed
+
+- **(pdf/ocr): the per-page OCR route sizes its batch by what a page costs to hold, not by the limit on returned content size.** `max_content_size` bounds the text an extraction returns and says nothing about the rasters a batch holds while it works, so on an ordinary 150 DPI document the arithmetic pinned the batch at four pages and no stage of the route could use more than four threads whatever the thread budget said. The width now comes from the page box and the render resolution, measured against free memory less the document and a reserve. Peak resident memory rises with it -- 2.45 GB to 3.84 GB on a 731-page document at a 32-thread budget -- because more rasters are in flight. Free memory is now read off the async executor rather than on a runtime worker. (GH#1724)
 
 ### Added
 

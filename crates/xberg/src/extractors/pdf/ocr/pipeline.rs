@@ -271,6 +271,7 @@ pub(crate) async fn extract_mixed_ocr_native(
                     config.images.as_ref(),
                 ),
             )
+            .await
         }
         None => configured_batch_size,
     };
@@ -1422,6 +1423,7 @@ pub(super) async fn extract_with_ocr_for_page(
             content.map(|b| b.len()).unwrap_or(0),
             UNMEASURED_OCR_PAGE_WORKING_SET_BYTES,
         )
+        .await
     } else {
         configured_batch_size
     };
@@ -2556,10 +2558,57 @@ pub(crate) fn build_page_raster_image(
 /// - ~50MB for render + encode working set (RGB buffer briefly, then PNG)
 /// - ~100MB for OCR working set per concurrent page
 /// - Plus the document itself and base allocations
+///
+/// Both callers are `async fn`s on the OCR route, and reading free memory blocks: on Linux it
+/// reads `/proc/meminfo` and the cgroup files, and on macOS it spawns a `sysctl` child process
+/// and waits for it. Doing that on a runtime worker stalls every other task sharing the thread,
+/// so the read goes to the blocking pool and the result is awaited. A read that cannot be
+/// joined reports zero, which is the same "could not tell" answer a failed query already gives
+/// and leaves the configured batch size alone.
 #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
-pub(super) fn adapt_batch_size_to_memory(configured: usize, document_size: usize, per_page_bytes: usize) -> usize {
-    adapt_batch_size_to_memory_inner(configured, document_size, per_page_bytes, get_available_memory())
+pub(super) async fn adapt_batch_size_to_memory(
+    configured: usize,
+    document_size: usize,
+    per_page_bytes: usize,
+) -> usize {
+    adapt_batch_size_to_memory_inner(
+        configured,
+        document_size,
+        per_page_bytes,
+        available_memory_off_executor().await,
+    )
 }
+
+/// Free memory, read without blocking the async executor.
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+async fn available_memory_off_executor() -> usize {
+    #[cfg(test)]
+    {
+        let pinned = TEST_AVAILABLE_MEMORY.load(std::sync::atomic::Ordering::SeqCst);
+        if pinned != 0 {
+            return pinned;
+        }
+    }
+
+    #[cfg(all(feature = "tokio-runtime", not(target_arch = "wasm32")))]
+    {
+        tokio::task::spawn_blocking(get_available_memory).await.unwrap_or(0)
+    }
+    #[cfg(not(all(feature = "tokio-runtime", not(target_arch = "wasm32"))))]
+    {
+        get_available_memory()
+    }
+}
+
+/// Free memory to report instead of reading the host, so a test that drives the whole route can
+/// pin the figure the batch width is computed from rather than asserting against whatever the
+/// machine running it happens to have free.
+///
+/// Zero means "not set". A test that wants to exercise the zero answer calls
+/// [`adapt_batch_size_to_memory_inner`] directly. It is process-wide, so every test that sets it
+/// is `#[serial]`.
+#[cfg(test)]
+pub(super) static TEST_AVAILABLE_MEMORY: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Pure core of [`adapt_batch_size_to_memory`], parameterized on free memory so a test can
 /// exercise a constrained host whatever the machine running it reports.

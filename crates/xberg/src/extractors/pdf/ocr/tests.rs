@@ -3651,6 +3651,31 @@ Buffers:           50000 kB
         assert!(narrow >= 1, "a shrunk batch must still carry one page");
     }
 
+    /// Pins the free-memory figure the OCR route sizes its batch from, and restores the real
+    /// reading on drop, so a test that drives the whole route asserts on the behaviour under
+    /// test rather than on how much memory the machine running it happens to have free.
+    ///
+    /// The override is process-wide, so every test that takes one is `#[serial]`. Dropping it
+    /// restores the reading even if the test panics.
+    #[cfg(all(feature = "pdf", any(feature = "ocr", feature = "ocr-pipeline")))]
+    struct PinnedAvailableMemory;
+
+    #[cfg(all(feature = "pdf", any(feature = "ocr", feature = "ocr-pipeline")))]
+    impl PinnedAvailableMemory {
+        fn set(bytes: usize) -> Self {
+            assert_ne!(bytes, 0, "zero means 'not pinned', so it cannot be pinned");
+            TEST_AVAILABLE_MEMORY.store(bytes, std::sync::atomic::Ordering::SeqCst);
+            Self
+        }
+    }
+
+    #[cfg(all(feature = "pdf", any(feature = "ocr", feature = "ocr-pipeline")))]
+    impl Drop for PinnedAvailableMemory {
+        fn drop(&mut self) {
+            TEST_AVAILABLE_MEMORY.store(0, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
     /// #1666/#1716: the per-page OCR route must keep as many pages in flight as the thread
     /// budget allows. The batch width used to come from `security_limits.max_content_size`,
     /// which pinned it at four pages for an ordinary 150 DPI document, so every stage of the
@@ -3659,9 +3684,9 @@ Buffers:           50000 kB
     ///
     /// This counts concurrent backend calls rather than wall clock. It states the mechanism,
     /// so it cannot flake under load: the route either had eight pages in flight at once or
-    /// it did not, however long each one took. It does need about 700 MB of free memory,
-    /// because that is what eight Letter pages in flight plus the fixed reserve costs; below
-    /// that the route is right to narrow the batch and the assertion is wrong, not the code.
+    /// it did not, however long each one took. The free-memory figure the batch width is
+    /// computed from is pinned rather than read from the host, so a constrained runner narrows
+    /// the batch for a reason this assertion would have reported as a regression.
     #[cfg(all(feature = "pdf", feature = "ocr", feature = "tokio-runtime"))]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
@@ -3726,6 +3751,13 @@ Buffers:           50000 kB
             peak: Arc::clone(&peak),
         }))
         .expect("registering the in-flight probe backend must succeed");
+
+        // Pin the free-memory figure the batch width is computed from. Letter pages cost about
+        // 21 MB each here, and the route reserves the document plus 512 MB, so a runner with
+        // less than roughly 700 MB free would size the batch below the budget and fail this on
+        // its host size rather than on the behaviour under test. 8 GB is far above the bound,
+        // so the width is decided by the thread budget, which is the thing being asserted.
+        let _memory = PinnedAvailableMemory::set(8 * 1024 * 1024 * 1024);
 
         // Letter, so each page costs about 21 MB to render and encode at the default 150 DPI.
         // The batch ceiling this fix deleted divided the 100 MiB default `max_content_size`
