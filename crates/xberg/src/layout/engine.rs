@@ -519,18 +519,29 @@ pub(crate) fn layout_inference_batch_capacity(
     Ok(capacity.min(candidate_count).max(1))
 }
 
-pub(crate) fn validate_layout_batch_peak(
-    images: &[&RgbImage],
-    security_limits: &crate::extractors::security::SecurityLimits,
-) -> crate::Result<()> {
-    let (width, height) = images.first().map_or((1, 1), |image| image.dimensions());
-    let current = images.iter().try_fold(0_u64, |total, image| {
+/// Sum the decoded size of every raster in `images`, reporting an overflow as a dimension
+/// error against `width` and `height`. The layout runner's per-chunk accounting and
+/// `validate_layout_batch_peak` both call this, so the two agree on what counts as live. ~keep
+pub(crate) fn live_raster_bytes<'a>(
+    images: impl IntoIterator<Item = &'a RgbImage>,
+    width: u32,
+    height: u32,
+) -> crate::Result<u64> {
+    images.into_iter().try_fold(0_u64, |total, image| {
         let bytes = u64::try_from(image.as_raw().len())
             .map_err(|_| crate::extraction::image_decode::image_dimension_error(width, height, u64::MAX, u64::MAX))?;
         total
             .checked_add(bytes)
             .ok_or_else(|| crate::extraction::image_decode::image_dimension_error(width, height, u64::MAX, u64::MAX))
-    })?;
+    })
+}
+
+pub(crate) fn validate_layout_batch_peak(
+    images: &[&RgbImage],
+    security_limits: &crate::extractors::security::SecurityLimits,
+) -> crate::Result<()> {
+    let (width, height) = images.first().map_or((1, 1), |image| image.dimensions());
+    let current = live_raster_bytes(images.iter().copied(), width, height)?;
     validate_layout_inference_peak(width, height, current, images.len(), security_limits)
 }
 

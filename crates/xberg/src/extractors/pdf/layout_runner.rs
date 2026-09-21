@@ -564,17 +564,12 @@ fn detect_layout_chunk(
     // This chunk's own rasters only. The pages already assembled into the
     // output are finished work, not part of the inference working set, so
     // charging them here would make the budget a function of document length
-    // (GH#1721) -- page count is bounded by `max_pages`, never by a byte limit.
-    let current_live_bytes = pages
-        .iter()
-        .filter_map(|page| page.image.as_ref())
-        .try_fold(0_u64, |total, image| {
-            total
-                .checked_add(u64::try_from(image.as_raw().len()).unwrap_or(u64::MAX))
-                .ok_or_else(|| {
-                    crate::extraction::image_decode::image_dimension_error(width, height, u64::MAX, u64::MAX)
-                })
-        })?;
+    // (GH#1721). Nothing caps the rasters this pass retains across a whole
+    // document by default: `max_content_size` bounds only the work in flight,
+    // and `max_pages`, which does bound the retained set, is `None` unless the
+    // caller sets it. ~keep
+    let current_live_bytes =
+        crate::layout::engine::live_raster_bytes(pages.iter().filter_map(|page| page.image.as_ref()), width, height)?;
     let capacity = crate::layout::engine::layout_inference_batch_capacity(
         width,
         height,
