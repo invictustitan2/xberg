@@ -14,7 +14,10 @@ evaluates false and the Android build is not CI-verified.
 Patch: replace with our fork coordinate.
 
 Applied: Stage 0, 2026-09-21
-Verified: pending — CI green on fork
+Verified: guard correct and workflow enabled on fork, but no runs
+queue. Likely cause: upstream reusable actions under xberg-io/actions
+are private to the org and unresolvable on the fork. Not blocking.
+Re-verify if upstream's actions become public.
 
 ## Planned patches (not yet applied)
 
