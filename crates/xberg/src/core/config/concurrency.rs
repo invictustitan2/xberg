@@ -64,7 +64,7 @@ pub struct ConcurrencyConfig {
     /// page image and recognition working set resident, so a host with many
     /// cores and little memory needs this lower than the thread budget. Set
     /// it to `4` to keep the fixed limit that releases up to 1.2.6 applied.
-    #[cfg_attr(feature = "alef-meta", alef(since = "1.3.0"))]
+    #[cfg_attr(feature = "alef-meta", alef(since = "1.2.7"))]
     pub max_concurrent_ocr: Option<usize>,
 }
 
