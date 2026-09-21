@@ -336,7 +336,10 @@ async fn batch_scheduler_restores_public_result_order_after_prioritizing() {
     }
 
     let config = ExtractionConfig {
-        concurrency: Some(crate::core::config::ConcurrencyConfig { max_threads: Some(2) }),
+        concurrency: Some(crate::core::config::ConcurrencyConfig {
+            max_threads: Some(2),
+            max_concurrent_ocr: None,
+        }),
         max_concurrent_extractions: Some(2),
         ..Default::default()
     };
@@ -436,7 +439,10 @@ async fn bounded_batch_scheduler_preserves_completion_and_error_indices() {
 #[cfg(layout_detection)]
 fn engine_batch_execution_plan_matches_layout_aware_resolution() {
     let config = ExtractionConfig {
-        concurrency: Some(crate::core::config::ConcurrencyConfig { max_threads: Some(4) }),
+        concurrency: Some(crate::core::config::ConcurrencyConfig {
+            max_threads: Some(4),
+            max_concurrent_ocr: None,
+        }),
         ..Default::default()
     };
     let non_layout = resolve_engine_batch_execution_plan_for(&config, LayoutBatchWorkload::None, 8);
@@ -461,7 +467,10 @@ fn engine_batch_execution_plan_matches_layout_aware_resolution() {
 #[test]
 fn engine_batch_base_config_applies_plan_budget_once() {
     let base = Arc::new(ExtractionConfig {
-        concurrency: Some(crate::core::config::ConcurrencyConfig { max_threads: Some(8) }),
+        concurrency: Some(crate::core::config::ConcurrencyConfig {
+            max_threads: Some(8),
+            max_concurrent_ocr: None,
+        }),
         ..Default::default()
     });
 
@@ -580,7 +589,10 @@ fn engine_batch_execution_plan_clamps_explicit_zero_to_one() {
 #[test]
 fn engine_batch_execution_plan_without_layout_respects_input_count() {
     let config = ExtractionConfig {
-        concurrency: Some(crate::core::config::ConcurrencyConfig { max_threads: Some(4) }),
+        concurrency: Some(crate::core::config::ConcurrencyConfig {
+            max_threads: Some(4),
+            max_concurrent_ocr: None,
+        }),
         ..Default::default()
     };
     let inputs = vec![ExtractInput::default()];
@@ -592,7 +604,10 @@ fn engine_batch_execution_plan_without_layout_respects_input_count() {
 #[test]
 fn engine_batch_classifies_all_markdown_pdfs_for_single_layout_worker() {
     let config = ExtractionConfig {
-        concurrency: Some(crate::core::config::ConcurrencyConfig { max_threads: Some(8) }),
+        concurrency: Some(crate::core::config::ConcurrencyConfig {
+            max_threads: Some(8),
+            max_concurrent_ocr: None,
+        }),
         layout: Some(Default::default()),
         use_layout_for_markdown: true,
         disable_ocr: true,
@@ -610,7 +625,10 @@ fn engine_batch_classifies_all_markdown_pdfs_for_single_layout_worker() {
 #[test]
 fn engine_batch_classifies_disabled_layout_as_none_when_ocr_is_disabled() {
     let config = ExtractionConfig {
-        concurrency: Some(crate::core::config::ConcurrencyConfig { max_threads: Some(8) }),
+        concurrency: Some(crate::core::config::ConcurrencyConfig {
+            max_threads: Some(8),
+            max_concurrent_ocr: None,
+        }),
         layout: Some(Default::default()),
         use_layout_for_markdown: false,
         disable_ocr: true,
@@ -626,7 +644,10 @@ fn engine_batch_classifies_disabled_layout_as_none_when_ocr_is_disabled() {
 #[test]
 fn engine_batch_classifies_partial_input_layout_override_as_mixed() {
     let config = ExtractionConfig {
-        concurrency: Some(crate::core::config::ConcurrencyConfig { max_threads: Some(8) }),
+        concurrency: Some(crate::core::config::ConcurrencyConfig {
+            max_threads: Some(8),
+            max_concurrent_ocr: None,
+        }),
         use_layout_for_markdown: true,
         disable_ocr: true,
         ..Default::default()
@@ -655,7 +676,10 @@ fn engine_batch_classifies_partial_input_layout_override_as_mixed() {
 #[test]
 fn engine_batch_classifies_ocr_capable_layout_as_mixed() {
     let config = ExtractionConfig {
-        concurrency: Some(crate::core::config::ConcurrencyConfig { max_threads: Some(8) }),
+        concurrency: Some(crate::core::config::ConcurrencyConfig {
+            max_threads: Some(8),
+            max_concurrent_ocr: None,
+        }),
         layout: Some(Default::default()),
         use_layout_for_markdown: false,
         disable_ocr: false,
@@ -671,7 +695,10 @@ fn engine_batch_classifies_ocr_capable_layout_as_mixed() {
 #[test]
 fn engine_batch_classifies_ordinary_batch_as_non_layout() {
     let config = ExtractionConfig {
-        concurrency: Some(crate::core::config::ConcurrencyConfig { max_threads: Some(8) }),
+        concurrency: Some(crate::core::config::ConcurrencyConfig {
+            max_threads: Some(8),
+            max_concurrent_ocr: None,
+        }),
         ..Default::default()
     };
     let inputs = vec![ExtractInput::from_uri("document.txt"); 4];
@@ -684,7 +711,10 @@ fn engine_batch_classifies_ordinary_batch_as_non_layout() {
 #[test]
 fn engine_batch_plan_ignores_shared_url_count_and_layout_overrides() {
     let config = ExtractionConfig {
-        concurrency: Some(crate::core::config::ConcurrencyConfig { max_threads: Some(8) }),
+        concurrency: Some(crate::core::config::ConcurrencyConfig {
+            max_threads: Some(8),
+            max_concurrent_ocr: None,
+        }),
         ..Default::default()
     };
     let shared = ExtractInput {
@@ -711,7 +741,10 @@ fn engine_batch_plan_ignores_shared_url_count_and_layout_overrides() {
 #[test]
 fn engine_batch_concurrency_detects_per_input_layout_override() {
     let config = ExtractionConfig {
-        concurrency: Some(crate::core::config::ConcurrencyConfig { max_threads: Some(4) }),
+        concurrency: Some(crate::core::config::ConcurrencyConfig {
+            max_threads: Some(4),
+            max_concurrent_ocr: None,
+        }),
         ..Default::default()
     };
     let inputs = vec![ExtractInput {

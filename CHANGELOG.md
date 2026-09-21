@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **(config): `ConcurrencyConfig::max_concurrent_ocr` and the `--max-concurrent-ocr` CLI flag cap concurrent Tesseract recognition sessions on their own.** Use it when the host has cores to spare but not the memory to run a recognition session on each of them. (GH#1727)
+
+### Changed
+
+- **(ocr): concurrent Tesseract recognition follows the thread budget instead of a fixed four.** The limit was a compile-time constant that no configuration reached, so raising `max_threads` could not raise recognition throughput, and recognition is most of the run on a scanned document. The default is now the thread budget, reduced to the number of sessions the host's free memory holds. Set `max_concurrent_ocr` to `4` to keep the previous behaviour. (GH#1727)
+
+---
+
 ## [1.2.6] - 2026-09-20
 
 ### Added
